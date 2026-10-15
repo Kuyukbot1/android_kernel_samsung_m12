@@ -19,22 +19,39 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
-      - name: 1. Ambil sumber kernel M12 (Android 13)
-        uses: actions/checkout@v4
-        with:
-          repository: SpacingBat3/android_kernel_samsung-m127f_a13
-          ref: master
-          path: kernel
-          fetch-depth: 1
+      - name: 0. Tes koneksi + info runner
+        run: |
+          echo "=== runner ==="
+          uname -a
+          echo "=== git ==="
+          git --version
+          echo "=== cek repo kernel bisa diakses? ==="
+          git ls-remote --heads https://github.com/SpacingBat3/android_kernel_samsung-m127f_a13.git | head -5
+          echo "=== disk ==="
+          df -h / | tail -1
+
+      - name: 1. Clone sumber kernel M12 (Android 13)
+        run: |
+          set -e
+          git clone --depth=1 --branch master \
+            https://github.com/SpacingBat3/android_kernel_samsung-m127f_a13.git kernel
+          cd kernel
+          echo "=== UKURAN & ISI ==="
+          du -sh . 
+          ls -la | head -25
+          echo "=== VERSI KERNEL (dari Makefile) ==="
+          head -6 Makefile
+          echo "=== DEFCONFIG ADA? ==="
+          ls -la arch/arm64/configs/exynos850-m12nsxx_defconfig
 
       - name: 2. Pasang paket yang dibutuhkan
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bc bison build-essential flex libssl-dev \
-            libelf-dev zip unzip python3 cpio
+            libelf-dev zip unzip python3 cpio wget
 
       - name: 3. Unduh toolchain
         run: |
@@ -43,48 +60,57 @@ jobs:
           cd $GITHUB_WORKSPACE/tc
 
           echo "--- GCC 4.9 ---"
-          curl -L --retry 3 -o gcc.tar.gz \
+          wget -q --tries=3 -O gcc.tar.gz \
             "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/archive/refs/heads/lineage-19.1.tar.gz"
           tar xzf gcc.tar.gz
           mv android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9-lineage-19.1 \
              aarch64-linux-android-4.9
+          chmod -R +x aarch64-linux-android-4.9/bin/ 2>/dev/null || true
           ls aarch64-linux-android-4.9/bin/ | head -5
 
           echo "--- CLANG r416183b ---"
-          curl -L --retry 3 -o clang.tar.gz \
+          wget -q --tries=3 -O clang.tar.gz \
             "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b/archive/refs/heads/lineage-20.0.tar.gz"
           tar xzf clang.tar.gz
           mv android_prebuilts_clang_kernel_linux-x86_clang-r416183b-lineage-20.0 clang
+          chmod -R +x clang/bin/ 2>/dev/null || true
           $GITHUB_WORKSPACE/tc/clang/bin/clang --version | head -2
 
           rm -f gcc.tar.gz clang.tar.gz
-          echo "OK"
+          echo "=== TOOLCHAIN SIAP ==="
+          du -sh $GITHUB_WORKSPACE/tc
 
       - name: 4. Integrasi KernelSU (mode kprobe, non-GKI)
         working-directory: kernel
         run: |
           set -e
+          echo "=== jalankan setup.sh KernelSU ==="
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
             | bash -s ${{ github.event.inputs.ksu_tag }}
-          echo "--- KernelSU terpasang ---"
-          ls -la KernelSU 2>/dev/null || ls -la kernelsu 2>/dev/null || true
-          ls drivers/ | grep -i ksu || true
+          echo ""
+          echo "=== hasil integrasi ==="
+          ls -la | grep -i -E 'ksu|kernelsu' || true
+          ls drivers/ | grep -i -E 'ksu|kernelsu' || true
+          echo "=== cek Kconfig/Makefile kena hook? ==="
+          grep -n -i 'kernelsu\|KSU' drivers/Kconfig 2>/dev/null | head -5 || true
+          grep -n -i 'kernelsu\|KSU' drivers/Makefile 2>/dev/null | head -5 || true
 
       - name: 5. Tambahkan CONFIG_KSU ke defconfig
         working-directory: kernel
         run: |
           set -e
           DC=arch/arm64/configs/exynos850-m12nsxx_defconfig
+          cp $DC $DC.orig
           echo "" >> $DC
           echo "# KernelSU" >> $DC
           echo "CONFIG_KSU=y" >> $DC
           echo "CONFIG_KPROBES=y" >> $DC
           echo "CONFIG_HAVE_KPROBES=y" >> $DC
           echo "CONFIG_KPROBE_EVENTS=y" >> $DC
-          echo "--- 8 baris terakhir defconfig ---"
+          echo "=== 8 baris terakhir ==="
           tail -8 $DC
 
-      - name: 6. Build (GCC 4.9)
+      - name: 6. BUILD - GCC 4.9
         if: ${{ github.event.inputs.use_clang == 'no' }}
         working-directory: kernel
         run: |
@@ -97,11 +123,10 @@ jobs:
           export KBUILD_BUILD_HOST=SM_M127F
           export CROSS_COMPILE=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
           export PATH=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin:$PATH
-
           make ARCH=arm64 exynos850-m12nsxx_defconfig
-          make ARCH=arm64 -j$(nproc)
+          make ARCH=arm64 -j$(nproc) 2>&1 | tail -200
 
-      - name: 6b. Build (CLANG)
+      - name: 6b. BUILD - CLANG
         if: ${{ github.event.inputs.use_clang == 'yes' }}
         working-directory: kernel
         run: |
@@ -114,19 +139,24 @@ jobs:
           export KBUILD_BUILD_HOST=SM_M127F
           export PATH=$GITHUB_WORKSPACE/tc/clang/bin:$PATH
           export CROSS_COMPILE=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
-
           make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
             exynos850-m12nsxx_defconfig
-          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- -j$(nproc)
+          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- -j$(nproc) 2>&1 | tail -200
 
-      - name: 7. Info hasil
+      - name: 7. Info hasil build
         working-directory: kernel
         run: |
-          echo "=== ISI arch/arm64/boot ==="
+          echo "=== arch/arm64/boot ==="
           ls -la arch/arm64/boot/ || true
           echo ""
-          echo "=== CARI Image ==="
-          find . -maxdepth 4 -name 'Image*' -type f -exec ls -la {} \; 2>/dev/null || true
+          echo "=== cari Image ==="
+          find . -maxdepth 4 -name 'Image*' -type f 2>/dev/null | while read f; do ls -la "$f"; done
+          echo ""
+          echo "=== cari dtb ==="
+          ls -la arch/arm64/boot/dts/samsung/ 2>/dev/null | head -20 || true
+          echo ""
+          echo "=== cek KSU masuk ke config akhir ==="
+          grep -i 'KSU' .config 2>/dev/null | head -10 || true
 
       - name: 8. Upload hasil
         uses: actions/upload-artifact@v4
@@ -136,6 +166,6 @@ jobs:
             kernel/arch/arm64/boot/Image
             kernel/arch/arm64/boot/Image.gz
             kernel/arch/arm64/boot/Image.lz4
-            kernel/arch/arm64/boot/dts/**
+            kernel/arch/arm64/boot/dts/samsung/*.dtb
           if-no-files-found: warn
           retention-days: 30
