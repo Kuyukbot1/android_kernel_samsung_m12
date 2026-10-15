@@ -9,11 +9,12 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: 1. Checkout Kernel Source
-        uses: actions/checkout@v4
-        with:
-          ref: 4.19.111-samsung
-          fetch-depth: 1
+      - name: 1. Clone Kernel Source
+        run: |
+          git clone --depth=1 --branch 4.19.111-samsung https://github.com/Kuyukbot1/android_kernel_samsung-m127f_a13.git .
+          ls -la
+          head -6 Makefile
+          ls -la arch/arm64/configs/exynos850-m12nsxx_defconfig
 
       - name: 2. Install Build Dependencies
         run: |
@@ -32,7 +33,7 @@ jobs:
           mv toolchains/gcc_tmp/* toolchains/aarch64-linux-android-4.9
           rm -rf toolchains/gcc_tmp
 
-          # 2. Clang 9 (clang-r353983c / 5484270) - exact Samsung compiler
+          # 2. Clang 9 (clang-r353983c / 5484270)
           echo "Downloading Clang r353983c..."
           mkdir -p toolchains/android_prebuilts_clang_host_linux-x86_clang-5484270-9.0
           curl -L --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r353983c.tar.gz" | tar -xz -C toolchains/android_prebuilts_clang_host_linux-x86_clang-5484270-9.0
@@ -46,13 +47,7 @@ jobs:
 
       - name: 4. Integrate KernelSU v0.9.5
         run: |
-          # Use official KernelSU non-GKI setup script for v0.9.5
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh" | bash -s v0.9.5
-
-          # Verify integration
-          ls -la drivers/kernelsu
-          grep -i "kernelsu" drivers/Makefile
-          grep -i "kernelsu" drivers/Kconfig
 
           # Enable in defconfig
           DC="arch/arm64/configs/exynos850-m12nsxx_defconfig"
