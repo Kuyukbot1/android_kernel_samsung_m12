@@ -1,4 +1,4 @@
-name: Build Kernel M12 + KernelSU (V5 Final)
+name: Build Kernel M12 + KernelSU
 
 on:
   workflow_dispatch:
@@ -9,147 +9,77 @@ jobs:
     timeout-minutes: 180
 
     steps:
-      - name: 0. Persiapan & Debugging
-        run: |
-          echo "=== Runner Info ==="
-          uname -a
-          df -h /
-          which git gcc make curl wget unzip tar gzip bzip2 xz-utils lz4 zstd python3 perl bc flex bison libssl-dev libelf-dev
-          
-          # Install dependencies yang mungkin kurang di runner standar
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
-            device-tree-compiler lz4 zip openjdk-17-jdk-headless \
-            clang lld llvm ninja-build cmake pkg-config \
-            git-lfs rsync
-      
-      - name: 1. Clone FORK Master (Sumber Utama)
+      - name: 1. Checkout Kernel Source
         uses: actions/checkout@v4
         with:
-          repository: Kuyukbot1/android_kernel_samsung-m127f_a13
-          ref: 4.19.111-samsung   # Branch eksplisit dari hasil analisa fork
-          path: kernel
+          ref: 4.19.111-samsung
           fetch-depth: 1
-          submodules: recursive   # Coba pull submodule jika ada, gagal? nanti kita handle manual
 
-      - name: 2. Verifikasi Struktur Kernel
+      - name: 2. Install Build Dependencies
         run: |
-          cd kernel
-          echo "=== Cek File Kunci ==="
-          ls -la Makefile arch/arm64/configs/exynos850-m12nsxx_defconfig build_kernel.sh || true
-          
-          # Jika defconfig tidak ada di branch ini, fallback ke master/upstream
-          if [ ! -f arch/arm64/configs/exynos850-m12nsxx_defconfig ]; then
-             echo "Defconfig hilang di branch 4.19.111-samsung. Mencoba clone ulang dari SpacingBat3..."
-             rm -rf ../kernel_orig
-             git clone --depth=1 https://github.com/SpacingBat3/android_kernel_samsung-m127f_a13.git ../kernel_orig
-             cp ../kernel_orig/arch/arm64/configs/exynos850-m12nsxx_defconfig arch/arm64/configs/
-          fi
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential bc bison flex libssl-dev libelf-dev \
+            lz4 zip tar gzip curl wget git cpio
 
-      - name: 3. Integrasi Manual KernelSU v0.9.5
+      - name: 3. Setup Toolchains (Samsung Clang 9 + GCC 4.9)
         run: |
-          cd kernel
-          
-          # Hapus folder kernelsu lama jika ada (untuk bersih-bersih)
-          rm -rf drivers/kernelsu KernelSU ksu
-          
-          # Download KernelSU v0.9.5 (versi terakhir non-GKI)
-          echo "Downloading KernelSU v0.9.5..."
-          mkdir -p drivers/kernelsu
-          cd drivers/kernelsu
-          
-          # Gunakan archive GitHub langsung agar stabil
-          curl -L -o ksu.tar.gz https://github.com/tiann/KernelSU/archive/refs/tags/v0.9.5.tar.gz
-          tar -xzf ksu.tar.gz --strip-components=1
-          rm ksu.tar.gz
-          
-          cd ../../
-          
-          # Patch drivers/Kconfig
-          if ! grep -q "source \"drivers/kernelsu/Kconfig\"" drivers/Kconfig; then
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-            echo "Patched drivers/Kconfig"
-          else
-            echo "drivers/Kconfig sudah punya hook KSU"
-          fi
-          
-          # Patch drivers/Makefile
-          if ! grep -q "obj-\$(CONFIG_KSU)" drivers/Makefile; then
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-            echo "Patched drivers/Makefile"
-          else
-            echo "drivers/Makefile sudah punya hook KSU"
-          fi
-
-      - name: 4. Konfigurasi Build (Defconfig + KSU)
-        run: |
-          cd kernel
-          
-          # Set LOCALVERSION agar unik dan mudah dikenali
-          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="+ksu"/' arch/arm64/configs/exynos850-m12nsxx_defconfig
-          
-          # Tambahkan CONFIG_KSU=y jika belum ada
-          if ! grep -q "^CONFIG_KSU=" arch/arm64/configs/exynos850-m12nsxx_defconfig; then
-            echo "CONFIG_KSU=y" >> arch/arm64/configs/exynos850-m12nsxx_defconfig
-            echo "Added CONFIG_KSU=y"
-          fi
-          
-          # Pastikan opsi penting lainnya aktif
-          for opt in CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS CONFIG_OVERLAY_FS; do
-             if ! grep -q "^$opt=y" arch/arm64/configs/exynos850-m12nsxx_defconfig; then
-                echo "$opt=y" >> arch/arm64/configs/exynos850-m12nsxx_defconfig
-                echo "Ensured $opt=y"
-             fi
-          done
-
-      - name: 5. Setup Toolchain (GCC 4.9 AArch64)
-        run: |
-          cd kernel
           mkdir -p toolchains
-          cd toolchains
-          
-          echo "Downloading GCC 4.9 AArch64..."
-          # Link LineageOS prebuilts GCC 4.9
-          curl -L -o gcc.tar.gz https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/archive/refs/heads/lineage-19.1.tar.gz
-          tar -xzf gcc.tar.gz
-          mv android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9-lineage-19.1 aarch64-linux-android-4.9
-          rm gcc.tar.gz
-          
-          export CROSS_COMPILE="$PWD/aarch64-linux-android-4.9/bin/aarch64-linux-android-"
-          echo "CROSS_COMPILE=$CROSS_COMPILE" >> $GITHUB_ENV
-          echo "Toolchain ready: $CROSS_COMPILE"
 
-      - name: 6. BUILD KERNEL
+          # 1. GCC 4.9 aarch64
+          echo "Downloading GCC 4.9..."
+          mkdir -p toolchains/gcc_tmp
+          curl -L --retry 3 "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/archive/refs/heads/lineage-19.1.tar.gz" | tar -xz -C toolchains/gcc_tmp
+          mv toolchains/gcc_tmp/* toolchains/aarch64-linux-android-4.9
+          rm -rf toolchains/gcc_tmp
+
+          # 2. Clang 9 (clang-r353983c / 5484270) - exact Samsung compiler
+          echo "Downloading Clang r353983c..."
+          mkdir -p toolchains/android_prebuilts_clang_host_linux-x86_clang-5484270-9.0
+          curl -L --retry 3 "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r353983c.tar.gz" | tar -xz -C toolchains/android_prebuilts_clang_host_linux-x86_clang-5484270-9.0
+
+          # 3. Symlink for proton-clang-13-clang expected by build_kernel.sh
+          ln -sf android_prebuilts_clang_host_linux-x86_clang-5484270-9.0 toolchains/proton-clang-13-clang
+
+          echo "Toolchains ready:"
+          ls -la toolchains/aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc
+          ls -la toolchains/android_prebuilts_clang_host_linux-x86_clang-5484270-9.0/bin/clang
+
+      - name: 4. Integrate KernelSU v0.9.5
         run: |
-          cd kernel
-          export ARCH=arm64
-          export CC=gcc
-          export HOSTCC=gcc
-          export LD=aarch64-linux-android-ld
-          
-          # Clean dulu untuk menghindari konflik cache
-          make mrproper
-          
-          # Load config
-          make exynos850-m12nsxx_defconfig
-          
-          # Oldconfig untuk mengisi default baru
-          make oldconfig
-          
-          # Build Image saja (lebih cepat daripada modules/dtbs terpisah jika dtb sudah di boot.img)
-          # Tapi kita butuh Image mentah untuk dibungkus magiskboot nanti
-          echo "Starting build..."
-          time make -j$(nproc) Image
-          
-          echo "Build finished."
-          ls -lh arch/arm64/boot/Image
-          
-          # Copy hasil ke tempat aman
-          cp arch/arm64/boot/Image /tmp/kernel-image.bin
+          # Use official KernelSU non-GKI setup script for v0.9.5
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/v0.9.5/kernel/setup.sh" | bash -s v0.9.5
 
-      - name: 7. Upload Artifact
+          # Verify integration
+          ls -la drivers/kernelsu
+          grep -i "kernelsu" drivers/Makefile
+          grep -i "kernelsu" drivers/Kconfig
+
+          # Enable in defconfig
+          DC="arch/arm64/configs/exynos850-m12nsxx_defconfig"
+          echo "" >> $DC
+          echo "CONFIG_KSU=y" >> $DC
+          echo "CONFIG_KPROBES=y" >> $DC
+          echo "CONFIG_HAVE_KPROBES=y" >> $DC
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DC
+          echo "CONFIG_OVERLAY_FS=y" >> $DC
+          tail -10 $DC
+
+      - name: 5. Build Kernel
+        run: |
+          chmod +x build_kernel.sh
+          ./build_kernel.sh
+
+      - name: 6. Check Build Output
+        run: |
+          echo "=== arch/arm64/boot ==="
+          ls -lh arch/arm64/boot/Image
+          ls -lh arch/arm64/boot/dts/samsung/*.dtb 2>/dev/null || true
+
+      - name: 7. Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: m12-kernel-ksu-v5
-          path: /tmp/kernel-image.bin
+          name: kernel-m12-kernelsu
+          path: |
+            arch/arm64/boot/Image
+            arch/arm64/boot/dts/samsung/*.dtb
           retention-days: 7
