@@ -1,141 +1,301 @@
-name: Build Kernel M12 + KernelSU
+name: Build Kernel M12 (SM-M127F) + KernelSU v0.9.5
+
+# ================================================================
+#  INI FILE FINAL — GANTI ISI .github/workflows/build.yml DI REPO:
+#      Kuyukbot1/android_kernel_samsung_m12  (branch: main)
+#
+#  PERUBAHAN UTAMA vs file lama (yang bikin "git failed exit code 1"):
+#
+#    LAMA : uses: actions/checkout@v4
+#           with: ref: 4.19.111-samsung        <-- SALAH REPO!
+#           (checkout mengambil repo SENDIRI = android_kernel_samsung_m12
+#            yang cuma punya branch "main" -> ref 4.19.111-samsung
+#            TIDAK ADA -> git fetch gagal -> exit 1 -> retry -> gagal lagi)
+#
+#    BARU : repository: Kuyukbot1/android_kernel_samsung-m127f_a13
+#           ref: 4.19.111-samsung              <-- REPO YANG BENAR
+#           (sudah diverifikasi ada: Makefile, build_kernel.sh,
+#            arch/arm64/configs/exynos850-m12nsxx_defconfig semua HTTP 200)
+#
+#  ------------------------------------------------------------------
+#  KESALAHAN KE-2 YANG PERNAH TERJADI: "ref: master" -> exit code 1
+#
+#    Log-nya: +refs/heads/master*:refs/remotes/origin/master*
+#
+#    "master" TIDAK ADA di repo mana pun di sini. Hasil git ls-remote:
+#       android_kernel_samsung-m127f_a13 -> HANYA 4.19.111-samsung
+#       android_kernel_samsung_m12       -> HANYA main
+#    PLUS: kalau "repository:" tidak ditulis, checkout memakai repo
+#    TEMPAT WORKFLOW BERADA (=...samsung_m12, branch "main"), sehingga
+#    SELALU pasti gagal. Jadi: WAJIB ada "repository:" + ref yang benar.
+#
+#    Di file ini sudah dipasang pengaman: step "1a" membuktikan ref-nya
+#    ada sebelum menyentuh checkout, jadi kalau salah akan ketahuan
+#    dalam hitungan detik dengan pesan jelas (bukan retry 10 detik).
+#  ------------------------------------------------------------------
+#
+#  Kecocokan dengan HP sudah diverifikasi lewat adb (SM-M127F):
+#    ro.product.device            = m12
+#    ro.build.fingerprint         = samsung/m12nnxx/m12:13/TP1A.220624.014/M127FXXU4DWC4
+#    kernel                        = 4.19.111-26004678
+#    compiler stok                 = Clang 9.0.3 (r353983c / 5484270)  <-- sama dgn yml
+#    defconfig target              = exynos850-m12nsxx_defconfig      <-- ada di repo
+#    arsitektur                    = exynos850
+# ================================================================
 
 on:
   workflow_dispatch:
     inputs:
       ksu_tag:
-        description: 'versi KernelSU (non-GKI terakhir: v0.9.5)'
+        description: 'Versi KernelSU (non-GKI terakhir = v0.9.5)'
         required: true
         default: 'v0.9.5'
-      use_clang:
-        description: 'pakai clang (kalau GCC gagal)'
+      ksu_branch:
+        description: 'v0.9.5 = KernelSU terakhir yang masih non-GKI (v1.0+ GKI-only)'
         required: true
-        default: 'no'
-        type: choice
-        options:
-          - 'no'
-          - 'yes'
+        default: 'v0.9.5'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
-      - name: 1. Ambil sumber kernel M12 (Android 13)
+      # ----------------------------------------------------------
+      # 1a. PENGAMAN — BUKTIKAN REF-NYA ADA SEBELUM CHECKOUT
+      #     Ini mencegah error "git failed with exit code 1" yang
+      #     membingungkan (retry 10-19 detik, pesan tidak jelas).
+      #     Kalau ref salah, job berhenti di sini dengan pesan jelas
+      #     + daftar branch yang benar-benar ada.
+      #
+      #     CATATAN: kedua repo di bawah ini isinya IDENTIK
+      #     (commit 015d55dfaa2916ad64ef97e8d4cd7f860d6a4e96).
+      #     Pilih salah satu, JANGAN ditukar ref-nya:
+      #        4.19.111-samsung        (repo Kuyukbot1 = fork Anda)
+      #        4.19.111-samsung        (repo SpacingBat3 = upstream)
+      #     "master" TIDAK ADA di kedua repo itu.
+      # ----------------------------------------------------------
+      - name: 1a. Cek ketersediaan ref di repo kernel (anti gagal-senyap)
+        run: |
+          set -e
+          REPO="Kuyukbot1/android_kernel_samsung-m127f_a13"
+          REF="4.19.111-samsung"
+
+          echo "Repo kernel : $REPO"
+          echo "Branch      : $REF"
+          echo ""
+          echo "=== Branch yang BENAR-BENAR ada di repo ini ==="
+          git ls-remote --heads "https://github.com/$REPO.git"
+          echo ""
+          if git ls-remote --heads "https://github.com/$REPO.git" | grep -qE "refs/heads/${REF}$"; then
+            echo "OK: ref '$REF' DITEMUKAN. Lanjut checkout."
+          else
+            echo "FATAL: ref '$REF' TIDAK ADA di $REPO."
+            echo "       Perhatikan daftar branch di atas, lalu perbaiki"
+            echo "       nilai 'ref:' pada step berikutnya."
+            echo "       INGAT: 'master' tidak ada di repo ini."
+            exit 1
+          fi
+
+      # ----------------------------------------------------------
+      # 1. AMBIL SUMBER KERNEL — REPO YANG BENAR
+      #    WAJIB pakai "repository:" — tanpa itu, actions/checkout
+      #    mengambil repo tempat workflow ini berada, yang isinya
+      #    hanya folder .github (tidak ada kernel) -> fetch gagal.
+      #
+      #    Ingin pakai repo SpacingBat3 (upstream) sebagai ganti?
+      #    Ganti TULISAN DI SINI SAJA + di step 1a:
+      #       REPO="SpacingBat3/android_kernel_samsung-m127f_a13"
+      #       repository: SpacingBat3/android_kernel_samsung-m127f_a13
+      #       ref:        4.19.111-samsung     <-- BUKAN master!
+      # ----------------------------------------------------------
+      - name: 1. Checkout Kernel Source (repo yang benar)
         uses: actions/checkout@v4
         with:
-          repository: SpacingBat3/android_kernel_samsung-m127f_a13
-          ref: master
+          repository: Kuyukbot1/android_kernel_samsung-m127f_a13
+          ref: 4.19.111-samsung
           path: kernel
           fetch-depth: 1
 
-      - name: 2. Pasang paket yang dibutuhkan
+      - name: 1b. Verifikasi sumber kernel
+        run: |
+          cd kernel
+          echo "=== Commit ==="
+          git log -1 --format='%H %ad %s' --date=iso
+          echo ""
+          echo "=== Versi kernel (HARUS 4.19.111) ==="
+          head -7 Makefile
+          echo ""
+          echo "=== File kunci yang WAJIB ada ==="
+          for f in Makefile \
+                   build_kernel.sh \
+                   arch/arm64/configs/exynos850-m12nsxx_defconfig \
+                   arch/arm64/boot/Makefile \
+                   drivers/Makefile \
+                   drivers/Kconfig \
+                   security/selinux/include/objsec.h; do
+            if [ -f "$f" ]; then echo "  OK   $f"; else echo "  HILANG $f"; exit 1; fi
+          done
+          echo ""
+          echo "=== Toolchain yang diminta build_kernel.sh (harus kita sediakan) ==="
+          grep -E 'ANDROID_TOOLCHAINS|CROSS_COMPILE|CLANG_PATH|CLANG_TRIPLE' build_kernel.sh
+
+      # ----------------------------------------------------------
+      # 2. DEPENDENSI
+      # ----------------------------------------------------------
+      - name: 2. Install build dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq bc bison build-essential flex libssl-dev \
-            libelf-dev zip unzip python3 cpio
+          sudo apt-get install -y -qq \
+            build-essential bc bison flex libssl-dev libelf-dev \
+            device-tree-compiler lz4 zip unzip tar gzip bzip2 xz-utils \
+            curl wget cpio python3 perl rsync
 
-      - name: 3. Unduh toolchain
+      # ----------------------------------------------------------
+      # 3. TOOLCHAIN — PERSIS SEPERTI YANG DIMINTA build_kernel.sh
+      #    (stok Samsung M127F dibangun pakai Clang r353983c / 5484270)
+      # ----------------------------------------------------------
+      - name: 3. Setup toolchains (path HARUS cocok build_kernel.sh)
         run: |
           set -e
-          mkdir -p $GITHUB_WORKSPACE/tc
-          cd $GITHUB_WORKSPACE/tc
+          mkdir -p kernel/toolchains
+          cd kernel/toolchains
 
-          echo "--- GCC 4.9 ---"
+          echo "--- (a) GCC 4.9 aarch64 ---"
           curl -L --retry 3 -o gcc.tar.gz \
             "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/archive/refs/heads/lineage-19.1.tar.gz"
           tar xzf gcc.tar.gz
           mv android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9-lineage-19.1 \
              aarch64-linux-android-4.9
-          ls aarch64-linux-android-4.9/bin/ | head -5
+          rm -f gcc.tar.gz
 
-          echo "--- CLANG r416183b ---"
-          curl -L --retry 3 -o clang.tar.gz \
-            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b/archive/refs/heads/lineage-20.0.tar.gz"
-          tar xzf clang.tar.gz
-          mv android_prebuilts_clang_kernel_linux-x86_clang-r416183b-lineage-20.0 clang
-          $GITHUB_WORKSPACE/tc/clang/bin/clang --version | head -2
+          echo "--- (b) Clang 9 r353983c (5484270) = compiler stok Samsung M127F ---"
+          mkdir -p android_prebuilts_clang_host_linux-x86_clang-5484270-9.0
+          curl -L --retry 3 \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android11-release/clang-r353983c.tar.gz" \
+            | tar xz -C android_prebuilts_clang_host_linux-x86_clang-5484270-9.0
 
-          rm -f gcc.tar.gz clang.tar.gz
-          echo "OK"
+          echo "--- (c) Symlink proton-clang-13-clang (diminta oleh CLANG_TRIPLE) ---"
+          ln -sf android_prebuilts_clang_host_linux-x86_clang-5484270-9.0 proton-clang-13-clang
 
-      - name: 4. Integrasi KernelSU (mode kprobe, non-GKI)
+          echo "=== Verifikasi toolchain ==="
+          ls -la aarch64-linux-android-4.9/bin/aarch64-linux-android-gcc
+          ls -la android_prebuilts_clang_host_linux-x86_clang-5484270-9.0/bin/clang
+          ls -la proton-clang-13-clang
+          ./android_prebuilts_clang_host_linux-x86_clang-5484270-9.0/bin/clang --version | head -2
+
+      # ----------------------------------------------------------
+      # 4. KernelSU v0.9.5 — setup.sh RESMI (bukan tar manual)
+      #    Kenapa setup.sh: dia bikin SYMLINK drivers/kernelsu ->
+      #    KernelSU/kernel DAN menambahkan hook ke drivers/Makefile
+      #    + drivers/Kconfig. Tar manual cuma menaruh file tanpa hook.
+      # ----------------------------------------------------------
+      - name: 4. Integrasi KernelSU (setup.sh resmi)
         working-directory: kernel
         run: |
           set -e
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
-            | bash -s ${{ github.event.inputs.ksu_tag }}
-          echo "--- KernelSU terpasang ---"
-          ls -la KernelSU 2>/dev/null || ls -la kernelsu 2>/dev/null || true
-          ls drivers/ | grep -i ksu || true
 
-      - name: 5. Tambahkan CONFIG_KSU ke defconfig
+          # Bersihkan sisa percobaan sebelumnya
+          rm -rf KernelSU drivers/kernelsu
+
+          echo "=== Jalankan setup.sh KernelSU ${{ github.event.inputs.ksu_tag }} ==="
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/${{ github.event.inputs.ksu_tag }}/kernel/setup.sh" \
+            | bash -s "${{ github.event.inputs.ksu_tag }}"
+
+          echo ""
+          echo "=== Verifikasi hasil setup.sh ==="
+          echo "-- symlink drivers/kernelsu --"
+          ls -la drivers/kernelsu
+          echo "-- file KernelSU/kernel --"
+          ls -la KernelSU/kernel/ksu.c KernelSU/kernel/Kconfig KernelSU/kernel/Makefile
+          echo "-- hook di drivers/Makefile --"
+          grep -n "kernelsu" drivers/Makefile
+          echo "-- hook di drivers/Kconfig --"
+          grep -n "kernelsu" drivers/Kconfig
+
+      # ----------------------------------------------------------
+      # 5. DEFCONFIG
+      #    KPROBES / HAVE_KPROBES / KPROBE_EVENTS / OVERLAY_FS
+      #    ternyata SUDAH ADA di defconfig asli (sudah diverifikasi),
+      #    jadi aman pakai script idempotent (cek dulu sebelum tambah).
+      # ----------------------------------------------------------
+      - name: 5. Konfigurasi defconfig
         working-directory: kernel
         run: |
           set -e
           DC=arch/arm64/configs/exynos850-m12nsxx_defconfig
-          echo "" >> $DC
-          echo "# KernelSU" >> $DC
-          echo "CONFIG_KSU=y" >> $DC
-          echo "CONFIG_KPROBES=y" >> $DC
-          echo "CONFIG_HAVE_KPROBES=y" >> $DC
-          echo "CONFIG_KPROBE_EVENTS=y" >> $DC
-          echo "--- 8 baris terakhir defconfig ---"
-          tail -8 $DC
 
-      - name: 6. Build (GCC 4.9)
-        if: ${{ github.event.inputs.use_clang == 'no' }}
-        working-directory: kernel
-        run: |
-          set -e
-          export ARCH=arm64
-          export PLATFORM_VERSION=13
-          export ANDROID_MAJOR_VERSION=t
-          export KCFLAGS="-mtune=cortex-a55"
-          export KBUILD_BUILD_USER=linux
-          export KBUILD_BUILD_HOST=SM_M127F
-          export CROSS_COMPILE=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
-          export PATH=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin:$PATH
+          echo "=== Nilai asli ==="
+          grep -E '^CONFIG_LOCALVERSION=|^CONFIG_KPROBES|^CONFIG_HAVE_KPROBES|^CONFIG_KPROBE_EVENTS|^CONFIG_OVERLAY_FS=|^CONFIG_KSU' "$DC" || true
 
-          make ARCH=arm64 exynos850-m12nsxx_defconfig
-          make ARCH=arm64 -j$(nproc)
+          # LOCALVERSION diberi tanda supaya gampang dikenali di HP
+          sed -i 's/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION="-m12-yuike"/' "$DC"
 
-      - name: 6b. Build (CLANG)
-        if: ${{ github.event.inputs.use_clang == 'yes' }}
-        working-directory: kernel
-        run: |
-          set -e
-          export ARCH=arm64
-          export PLATFORM_VERSION=13
-          export ANDROID_MAJOR_VERSION=t
-          export KCFLAGS="-mtune=cortex-a55"
-          export KBUILD_BUILD_USER=linux
-          export KBUILD_BUILD_HOST=SM_M127F
-          export PATH=$GITHUB_WORKSPACE/tc/clang/bin:$PATH
-          export CROSS_COMPILE=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          # CONFIG_KSU=y  (wajib, ini yang membangun drivers/kernelsu)
+          if ! grep -q '^CONFIG_KSU=' "$DC"; then
+            printf '\n# KernelSU\nCONFIG_KSU=y\n' >> "$DC"
+            echo "ditambah: CONFIG_KSU=y"
+          fi
 
-          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
-            exynos850-m12nsxx_defconfig
-          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- -j$(nproc)
+          # jaga-jaga kalau defconfig berubah di masa depan
+          for opt in CONFIG_KPROBES CONFIG_HAVE_KPROBES CONFIG_KPROBE_EVENTS CONFIG_OVERLAY_FS; do
+            if ! grep -q "^${opt}=y" "$DC"; then
+              echo "${opt}=y" >> "$DC"
+              echo "ditambah: ${opt}=y"
+            else
+              echo "sudah ada: ${opt}=y"
+            fi
+          done
 
-      - name: 7. Info hasil
-        working-directory: kernel
-        run: |
-          echo "=== ISI arch/arm64/boot ==="
-          ls -la arch/arm64/boot/ || true
           echo ""
-          echo "=== CARI Image ==="
-          find . -maxdepth 4 -name 'Image*' -type f -exec ls -la {} \; 2>/dev/null || true
+          echo "=== Nilai setelah patch ==="
+          grep -E '^CONFIG_LOCALVERSION=|^CONFIG_KSU|^CONFIG_KPROBES|^CONFIG_HAVE_KPROBES|^CONFIG_KPROBE_EVENTS|^CONFIG_OVERLAY_FS=' "$DC"
 
-      - name: 8. Upload hasil
+      # ----------------------------------------------------------
+      # 6. BUILD
+      #    Dipakai build_kernel.sh milik repo (bukan make manual),
+      #    karena dia sudah menset PLATFORM_VERSION=13,
+      #    ANDROID_MAJOR_VERSION=t, KCFLAGS=-mtune=cortex-a55
+      #    yang diperlukan Exynos 850.
+      # ----------------------------------------------------------
+      - name: 6. Build kernel
+        working-directory: kernel
+        run: |
+          set -e
+          chmod +x build_kernel.sh
+
+          echo "=== Mulai build (ini bagian terlama, tunggu 30-90 menit) ==="
+          time ./build_kernel.sh
+
+          echo ""
+          echo "=== Hasil build ==="
+          ls -lh arch/arm64/boot/Image
+          ls -lh arch/arm64/boot/dts/samsung/*.dtb 2>/dev/null | head -20 || true
+
+      # ----------------------------------------------------------
+      # 7. RINGKASAN + VERIFIKASI KECOCOKAN
+      # ----------------------------------------------------------
+      - name: 7. Verifikasi hasil vs HP
+        working-directory: kernel
+        run: |
+          echo "=== Versi kernel hasil build ==="
+          strings arch/arm64/boot/Image | grep -m3 "Linux version 4.19.111" || true
+          echo ""
+          echo "=== Tanda KernelSU ikut masuk ==="
+          strings arch/arm64/boot/Image | grep -m5 -i "kernelsu" || echo "(cek manual kalau kosong)"
+          echo ""
+          echo "=== ANDROID 13 marker ==="
+          strings arch/arm64/boot/Image | grep -m3 "TP1A.220624.014" || true
+          echo ""
+          echo "=== Ukuran Image (stok = ~37.191.692 B) ==="
+          stat -c '%s %n' arch/arm64/boot/Image
+
+      - name: 8. Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-m12-ksu
+          name: kernel-m12-ksu-v095
           path: |
             kernel/arch/arm64/boot/Image
-            kernel/arch/arm64/boot/Image.gz
-            kernel/arch/arm64/boot/Image.lz4
-            kernel/arch/arm64/boot/dts/**
-          if-no-files-found: warn
+            kernel/arch/arm64/boot/dts/samsung/*.dtb
+          if-no-files-found: error
           retention-days: 30
