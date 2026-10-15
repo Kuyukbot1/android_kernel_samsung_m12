@@ -1,0 +1,141 @@
+name: Build Kernel M12 + KernelSU
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_tag:
+        description: 'versi KernelSU (non-GKI terakhir: v0.9.5)'
+        required: true
+        default: 'v0.9.5'
+      use_clang:
+        description: 'pakai clang (kalau GCC gagal)'
+        required: true
+        default: 'no'
+        type: choice
+        options:
+          - 'no'
+          - 'yes'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: 1. Ambil sumber kernel M12 (Android 13)
+        uses: actions/checkout@v4
+        with:
+          repository: SpacingBat3/android_kernel_samsung-m127f_a13
+          ref: master
+          path: kernel
+          fetch-depth: 1
+
+      - name: 2. Pasang paket yang dibutuhkan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison build-essential flex libssl-dev \
+            libelf-dev zip unzip python3 cpio
+
+      - name: 3. Unduh toolchain
+        run: |
+          set -e
+          mkdir -p $GITHUB_WORKSPACE/tc
+          cd $GITHUB_WORKSPACE/tc
+
+          echo "--- GCC 4.9 ---"
+          curl -L --retry 3 -o gcc.tar.gz \
+            "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/archive/refs/heads/lineage-19.1.tar.gz"
+          tar xzf gcc.tar.gz
+          mv android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9-lineage-19.1 \
+             aarch64-linux-android-4.9
+          ls aarch64-linux-android-4.9/bin/ | head -5
+
+          echo "--- CLANG r416183b ---"
+          curl -L --retry 3 -o clang.tar.gz \
+            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r416183b/archive/refs/heads/lineage-20.0.tar.gz"
+          tar xzf clang.tar.gz
+          mv android_prebuilts_clang_kernel_linux-x86_clang-r416183b-lineage-20.0 clang
+          $GITHUB_WORKSPACE/tc/clang/bin/clang --version | head -2
+
+          rm -f gcc.tar.gz clang.tar.gz
+          echo "OK"
+
+      - name: 4. Integrasi KernelSU (mode kprobe, non-GKI)
+        working-directory: kernel
+        run: |
+          set -e
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+            | bash -s ${{ github.event.inputs.ksu_tag }}
+          echo "--- KernelSU terpasang ---"
+          ls -la KernelSU 2>/dev/null || ls -la kernelsu 2>/dev/null || true
+          ls drivers/ | grep -i ksu || true
+
+      - name: 5. Tambahkan CONFIG_KSU ke defconfig
+        working-directory: kernel
+        run: |
+          set -e
+          DC=arch/arm64/configs/exynos850-m12nsxx_defconfig
+          echo "" >> $DC
+          echo "# KernelSU" >> $DC
+          echo "CONFIG_KSU=y" >> $DC
+          echo "CONFIG_KPROBES=y" >> $DC
+          echo "CONFIG_HAVE_KPROBES=y" >> $DC
+          echo "CONFIG_KPROBE_EVENTS=y" >> $DC
+          echo "--- 8 baris terakhir defconfig ---"
+          tail -8 $DC
+
+      - name: 6. Build (GCC 4.9)
+        if: ${{ github.event.inputs.use_clang == 'no' }}
+        working-directory: kernel
+        run: |
+          set -e
+          export ARCH=arm64
+          export PLATFORM_VERSION=13
+          export ANDROID_MAJOR_VERSION=t
+          export KCFLAGS="-mtune=cortex-a55"
+          export KBUILD_BUILD_USER=linux
+          export KBUILD_BUILD_HOST=SM_M127F
+          export CROSS_COMPILE=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export PATH=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin:$PATH
+
+          make ARCH=arm64 exynos850-m12nsxx_defconfig
+          make ARCH=arm64 -j$(nproc)
+
+      - name: 6b. Build (CLANG)
+        if: ${{ github.event.inputs.use_clang == 'yes' }}
+        working-directory: kernel
+        run: |
+          set -e
+          export ARCH=arm64
+          export PLATFORM_VERSION=13
+          export ANDROID_MAJOR_VERSION=t
+          export KCFLAGS="-mtune=cortex-a55"
+          export KBUILD_BUILD_USER=linux
+          export KBUILD_BUILD_HOST=SM_M127F
+          export PATH=$GITHUB_WORKSPACE/tc/clang/bin:$PATH
+          export CROSS_COMPILE=$GITHUB_WORKSPACE/tc/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+
+          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+            exynos850-m12nsxx_defconfig
+          make ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- -j$(nproc)
+
+      - name: 7. Info hasil
+        working-directory: kernel
+        run: |
+          echo "=== ISI arch/arm64/boot ==="
+          ls -la arch/arm64/boot/ || true
+          echo ""
+          echo "=== CARI Image ==="
+          find . -maxdepth 4 -name 'Image*' -type f -exec ls -la {} \; 2>/dev/null || true
+
+      - name: 8. Upload hasil
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-m12-ksu
+          path: |
+            kernel/arch/arm64/boot/Image
+            kernel/arch/arm64/boot/Image.gz
+            kernel/arch/arm64/boot/Image.lz4
+            kernel/arch/arm64/boot/dts/**
+          if-no-files-found: warn
+          retention-days: 30
